@@ -7,10 +7,10 @@ from transformers import AutoTokenizer
 from sentence_transformers import SentenceTransformer
 import chromadb
 from langchain_ollama import ChatOllama
-from langchain_core.prompts import PromptTemplate
+from langchain_core.prompts import PromptTemplate, ChatPromptTemplate, MessagesPlaceholder
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
-from langchain.chains.llm import LLMChain
+from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.output_parsers import StrOutputParser
 
 def delete_empty_json_files(folder):
@@ -162,17 +162,21 @@ llm = ChatOllama(
     temperature=0,
     num_predict=150
 )
-
-prompt = PromptTemplate(
-    template="""
-    Answer the questions based on the text below.
-    If you cannot answer the question using the provided information answer with "I don't know".
-    context: {context}
-    Question: {question}
-    Answer: 
-    """,
-    input_variables=['context', 'question']
-)
+messages = [
+    ('system', "You must answer only based on the context and list every artwork in the context that matches the question. Do not use prior knowledge. If uncertain, you may say 'I don't know'."),
+    ('human', 'Context:\n{context}\n\nQuestion: {question}')
+]
+prompt_template = ChatPromptTemplate.from_messages(messages)
+# prompt = PromptTemplate(
+#     template="""
+#     Answer the questions based on the text below.
+#     If you cannot answer the question using the provided information answer with "I don't know".
+#     context: {context}
+#     Question: {question}
+#     Answer: 
+#     """,
+#     input_variables=['context', 'question']
+# )
 
 def simple_format(doc):
     meta = doc.metadata or {}
@@ -194,28 +198,28 @@ def simple_format(doc):
     creditline = data.get("creditline") or meta.get("creditline")
     object_name = data.get("object_name") or meta.get("object_name")
     medium = data.get("medium") or meta.get("medium")
+    res_context = f'"{title}" is a {dated} {classification} by {artist} created in {continent}, {country}. This work belongs to "{department}" collection and made from {medium}'
+    # if title: lines.append(f'{title}')
+    # if artist: lines.append(f'by {artist}')
+    # if dated: lines.append(f'({dated})')
+    # if classification: lines.append(classification)
+    # if department: lines.append(department)
+    # if continent: lines.append(continent)
+    # if country: lines.append(country)
+    # # if creditline: lines.append(creditline)
+    # # if object_name: lines.append(object_name)
+    # if medium: lines.append(f'made of {medium}')
+    # if text: lines.append(text)
 
-    if title: lines.append(f"Название: {title}")
-    if artist: lines.append(f"Автор: {artist}")
-    if dated: lines.append(f"Дата: {dated}")
-    if classification: lines.append(f"Тип: {classification}")
-    if department: lines.append(f"Тип: {department}")
-    if continent: lines.append(f"Тип: {continent}")
-    if country: lines.append(f"Тип: {country}")
-    if creditline: lines.append(f"Тип: {creditline}")
-    if object_name: lines.append(f"Тип: {object_name}")
-    if medium: lines.append(f"Тип: {medium}")
-    if text: lines.append(f"Тип: {text}")
+    return res_context
 
-    return "\n".join(lines)
-
-def build_simple_context(docs, max_chunks=5):
+def build_simple_context(docs, max_chunks=10):
     chunks = []
     for i, doc in enumerate(docs[:max_chunks]):
         chunk = simple_format(doc)
         print(f"\n[DEBUG] chunk {i+1}:\n{chunk}\n{'-'*40}")
         chunks.append(chunk)
-    return "\n\n---\n\n".join(chunks)
+    return "\n".join(chunks)
 
 
 
@@ -226,32 +230,47 @@ vectorstore = Chroma(
     collection_name="rag_chunks",
     embedding_function=embedder
 )
-retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
+retriever = vectorstore.as_retriever(search_kwargs={"k": 10})
 
-llm_chain = prompt | llm | StrOutputParser()
-def rag_pipeline(question, retriever, top_k=5):
-    logging.info(f'Получен вопрос: {question}')
+llm_chain = prompt_template | llm | StrOutputParser()
+
+def rag_pipeline(question, retriever):
+    steps = []
+    def get_logs(text):
+        logging.info(text)
+        steps.append(text)
+
+    get_logs(f'Question recieved')
+    
 
     try:
         docs = retriever.invoke(question)
         context = build_simple_context(docs)
-        logging.info(f'Найдено {len(docs)} документов')
-
+        get_logs(f'Find {len(docs)} Documents')
+        
+        
         result = llm_chain.invoke({
             'context': context,
             'question': question
         })
-        logging.info("✅ Ответ сгенерирован.")
-        return {'answer': result, 'sources': [doc.metadata for doc in docs]}
+        
+        get_logs("Answer generated.")
+        return {'answer': result,'context': context, 'sources': [doc.metadata for doc in docs], 'trace': steps}
     except Exception as e:
-        logging.error(f"❌ Ошибка в RAG-конвейере: {e}")
+        get_logs(f"Ошибка в RAG-конвейере: {e}")
         return {
-            "answer": "⚠️ Не удалось получить ответ.",
+            "answer": "Не удалось получить ответ.",
             "sources": []
         }
-
-response = rag_pipeline('Show me artworks related to religious themes', retriever)
-print("🧠 Ответ:\n", response["answer"])
-print("\n📚 Источники:")
-for meta in response["sources"]:
-    print("-", meta.get("title") or meta.get("id") or "Без названия")
+flag = True    
+# while flag:
+#     user_question = input('Your question:')
+#     # prompt_value = prompt_template.invoke({'context': rag_pipeline(user_question, retriever), 'question': user_question})
+#     response = rag_pipeline(user_question, retriever)
+#     # print(response)
+#     # print("🧠 Ответ:\n", response["answer"])
+#     # print("\n📚 Источники:")
+#     # for meta in response["sources"]:
+#     #     print("-", meta.get("title") or meta.get("id") or "Без названия")
+#     if user_question in ['exit', 'ex', 'back']:
+#         flag = False
